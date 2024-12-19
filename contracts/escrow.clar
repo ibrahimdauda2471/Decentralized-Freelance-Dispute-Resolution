@@ -1,39 +1,58 @@
-;; Escrow Contract
+;; Arbitration Contract
 
-(define-map projects uint {
-    client: principal,
-    freelancer: principal,
-    amount: uint,
+(define-map disputes uint {
+    project-id: uint,
+    jurors: (list 3 principal),
+    votes-for-client: uint,
+    votes-for-freelancer: uint,
     status: (string-ascii 20)
 })
 
-(define-data-var project-counter uint u0)
+(define-map juror-pool principal bool)
 
-(define-public (create-project (freelancer principal) (amount uint))
+(define-data-var dispute-counter uint u0)
+
+(define-public (register-as-juror)
+    (ok (map-set juror-pool tx-sender true)))
+
+(define-public (create-dispute (project-id uint))
     (let
-        ((project-id (+ (var-get project-counter) u1)))
-        (map-set projects project-id {
-            client: tx-sender,
-            freelancer: freelancer,
-            amount: amount,
-            status: "active"
+        ((dispute-id (+ (var-get dispute-counter) u1))
+         (jurors (unwrap! (select-random-jurors) (err u500))))
+        (map-set disputes dispute-id {
+            project-id: project-id,
+            jurors: jurors,
+            votes-for-client: u0,
+            votes-for-freelancer: u0,
+            status: "open"
         })
-        (var-set project-counter project-id)
-        (ok project-id)))
+        (var-set dispute-counter dispute-id)
+        (ok dispute-id)))
 
-(define-public (release-funds (project-id uint))
-    (let ((project (unwrap! (map-get? projects project-id) (err u404))))
-        (asserts! (is-eq tx-sender (get client project)) (err u403))
-        (asserts! (is-eq (get status project) "active") (err u400))
-        (try! (stx-transfer? (get amount project) tx-sender (get freelancer project)))
-        (ok (map-set projects project-id (merge project { status: "completed" })))))
+(define-public (vote-on-dispute (dispute-id uint) (vote-for-client bool))
+    (let ((dispute (unwrap! (map-get? disputes dispute-id) (err u404))))
+        (asserts! (is-eq (get status dispute) "open") (err u400))
+        (asserts! (is-some (index-of? (get jurors dispute) tx-sender)) (err u403))
+        (if vote-for-client
+            (map-set disputes dispute-id (merge dispute { votes-for-client: (+ (get votes-for-client dispute) u1) }))
+            (map-set disputes dispute-id (merge dispute { votes-for-freelancer: (+ (get votes-for-freelancer dispute) u1) }))
+        )
+        (let ((updated-dispute (unwrap! (map-get? disputes dispute-id) (err u404))))
+            (if (>= (+ (get votes-for-client updated-dispute) (get votes-for-freelancer updated-dispute)) u2)
+                (begin
+                    (map-set disputes dispute-id (merge updated-dispute { status: "resolved" }))
+                    (ok true)
+                )
+                (ok false)))))
 
-(define-public (initiate-dispute (project-id uint))
-    (let ((project (unwrap! (map-get? projects project-id) (err u404))))
-        (asserts! (or (is-eq tx-sender (get client project)) (is-eq tx-sender (get freelancer project))) (err u403))
-        (asserts! (is-eq (get status project) "active") (err u400))
-        (ok (map-set projects project-id (merge project { status: "disputed" })))))
+(define-private (select-random-jurors)
+    (let ((juror-list (unwrap! (fold get-jurors (map-to-list juror-pool) (list)) (err u500))))
+        (ok (take (shuffle juror-list) u3))))
 
-(define-read-only (get-project (project-id uint))
-    (ok (unwrap! (map-get? projects project-id) (err u404))))
+(define-private (get-jurors (entry {key: principal, value: bool}) (result (list 100 principal)))
+    (if (get value entry)
+        (unwrap-panic (as-max-len? (append result (get key entry)) u100))
+        result))
 
+(define-read-only (get-dispute (dispute-id uint))
+    (ok (unwrap! (map-get? disputes dispute-id) (err u404))))
